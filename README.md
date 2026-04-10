@@ -8,6 +8,8 @@ Allows rating Playlists, Artists and Albums
 
 Allows you to save settings on Exit
 
+Added Statistics to see which Artists are top rated
+
 Added option to not tag songs with identical names so hopefully no dupicates, it should pick the 1st album release.
 
 Requirements: Python and pip
