@@ -3,3 +3,7 @@ Script has GUI - connects to Plex and Tidal (autorized via web browser)
 Has option to clear ALL Plex ratings
 Allows rating Playlists, Artists and Albums
 Allows you to save settings on Exit
+
+Requirements: Python and pip
+
+pip install PyQt6 plexapi requests tidalapi 
