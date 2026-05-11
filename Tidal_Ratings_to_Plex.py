@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Plex Tidal Music Matcher
-Matches songs from Plex library with Tidal and rates them by popularity
-Includes credential saving, duplicate detection, and library selection
+Plex Tidal Music Matcher - Enhanced & Optimized Edition
+Faster library loading with caching and batch operations
 """
 
 import sys
@@ -10,7 +9,6 @@ import os
 import json
 import time
 import webbrowser
-import base64
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -23,10 +21,11 @@ try:
         QMessageBox, QTabWidget, QTableWidget, QTableWidgetItem,
         QHeaderView, QSplitter, QFileDialog, QDialog,
         QListWidget, QListWidgetItem, QAbstractItemView, QRadioButton,
-        QButtonGroup, QTreeWidget, QTreeWidgetItem, QMenu, QFrame
+        QButtonGroup, QTreeWidget, QTreeWidgetItem, QMenu, QFrame,
+        QScrollArea
     )
     from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-    from PyQt6.QtGui import QTextCursor, QColor, QAction, QFont
+    from PyQt6.QtGui import QTextCursor, QColor, QAction, QKeySequence, QShortcut
 except ImportError as e:
     print(f"ERROR: PyQt6 not installed. Run: pip install PyQt6")
     input("Press Enter to exit...")
@@ -48,33 +47,351 @@ except ImportError:
 
 QVBoxLayoutDialog = QVBoxLayout
 
-# Configuration file paths
+# Configuration files
 CREDENTIALS_FILE = "plex_tidal_credentials.json"
-CONFIG_FILE = "plex_tidal_config.json"
+PROGRESS_FILE = "matching_progress.json"
+THEME_FILE = "theme_settings.json"
+TIDAL_SESSION_FILE = "tidal_session.json"
+LIBRARY_FILE = "selected_library.json"
 
 
-class LibraryLoaderThread(QThread):
-    """Thread for loading library items"""
+# ============================================================================
+# THEME MANAGER
+# ============================================================================
+
+class ThemeManager:
+    THEMES = {
+        'dark': """
+            QMainWindow { background-color: #2b2b2b; }
+            QLabel { color: #ffffff; font-size: 12px; }
+            QPushButton { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; padding: 10px; border-radius: 4px; }
+            QPushButton:hover { background-color: #4a4a4a; }
+            QPushButton:disabled { background-color: #2a2a2a; color: #888888; }
+            QLineEdit, QSpinBox { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; padding: 8px; border-radius: 3px; }
+            QTextEdit { background-color: #1e1e1e; color: #00ff00; border: 1px solid #555555; }
+            QProgressBar { border: 1px solid #555555; border-radius: 3px; color: #ffffff; }
+            QProgressBar::chunk { background-color: #00a8ff; }
+            QGroupBox { color: #ffffff; border: 2px solid #555555; border-radius: 5px; margin-top: 10px; font-weight: bold; padding: 15px; }
+            QTableWidget { background-color: #1e1e1e; color: #ffffff; gridline-color: #555555; }
+            QHeaderView::section { background-color: #3c3c3c; color: #ffffff; padding: 8px; border: 1px solid #555555; }
+            QTabWidget::pane { border: 1px solid #555555; background-color: #2b2b2b; }
+            QTabBar::tab { background-color: #3c3c3c; color: #ffffff; padding: 10px 20px; }
+            QTabBar::tab:selected { background-color: #00a8ff; }
+            QCheckBox { color: #ffffff; }
+            QMenuBar { background-color: #3c3c3c; color: #ffffff; }
+            QMenuBar::item:selected { background-color: #00a8ff; }
+            QMenu { background-color: #3c3c3c; color: #ffffff; border: 1px solid #555555; }
+            QMenu::item:selected { background-color: #00a8ff; }
+            QTreeWidget { background-color: #1e1e1e; color: #ffffff; }
+            QTreeWidget::item:selected { background-color: #00a8ff; }
+            QRadioButton { color: #ffffff; }
+            QDialog { background-color: #2b2b2b; }
+            QListWidget { background-color: #1e1e1e; color: #ffffff; }
+        """,
+        'light': """
+            QMainWindow { background-color: #f5f5f5; }
+            QLabel { color: #333333; font-size: 12px; }
+            QPushButton { background-color: #e0e0e0; color: #333333; border: 1px solid #cccccc; padding: 10px; border-radius: 4px; }
+            QPushButton:hover { background-color: #d0d0d0; }
+            QLineEdit, QSpinBox { background-color: #ffffff; color: #333333; border: 1px solid #cccccc; padding: 8px; border-radius: 3px; }
+            QTextEdit { background-color: #ffffff; color: #006600; border: 1px solid #cccccc; }
+            QProgressBar { border: 1px solid #cccccc; }
+            QProgressBar::chunk { background-color: #0078d4; }
+            QGroupBox { color: #333333; border: 2px solid #cccccc; }
+            QTableWidget { background-color: #ffffff; color: #333333; }
+            QHeaderView::section { background-color: #e0e0e0; color: #333333; }
+            QTabBar::tab { background-color: #e0e0e0; color: #333333; }
+            QTabBar::tab:selected { background-color: #0078d4; color: white; }
+            QCheckBox { color: #333333; }
+            QMenuBar { background-color: #e0e0e0; color: #333333; }
+            QRadioButton { color: #333333; }
+            QDialog { background-color: #f5f5f5; }
+            QListWidget { background-color: #ffffff; color: #333333; }
+            QTreeWidget { background-color: #ffffff; color: #333333; }
+            QTreeWidget::item:selected { background-color: #0078d4; color: white; }
+        """
+    }
     
+    @classmethod
+    def get_themes(cls):
+        return list(cls.THEMES.keys())
+    
+    @classmethod
+    def get_theme(cls, theme_name):
+        return cls.THEMES.get(theme_name, cls.THEMES['dark'])
+    
+    @classmethod
+    def save_theme_preference(cls, theme_name):
+        try:
+            with open(THEME_FILE, 'w') as f:
+                json.dump({'theme': theme_name}, f)
+        except:
+            pass
+    
+    @classmethod
+    def load_theme_preference(cls):
+        try:
+            if os.path.exists(THEME_FILE):
+                with open(THEME_FILE, 'r') as f:
+                    data = json.load(f)
+                    return data.get('theme', 'dark')
+        except:
+            pass
+        return 'dark'
+
+
+# ============================================================================
+# PROGRESS MANAGER
+# ============================================================================
+
+class ProgressManager:
+    @staticmethod
+    def save_progress(matches, filename=PROGRESS_FILE):
+        try:
+            progress = {
+                'timestamp': datetime.now().isoformat(),
+                'matches_count': len(matches),
+                'matches': []
+            }
+            for match in matches:
+                try:
+                    track = match['plex_track']
+                    progress['matches'].append({
+                        'artist': track.artist().title if track.artist() else 'Unknown',
+                        'track': track.title,
+                        'album': track.album().title if track.album() else 'Unknown',
+                        'popularity': match['popularity'],
+                        'rating': min(5, max(0, match['popularity'] / 20))
+                    })
+                except:
+                    pass
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(progress, f, indent=2, ensure_ascii=False)
+            return True
+        except:
+            return False
+    
+    @staticmethod
+    def load_progress(filename=PROGRESS_FILE):
+        try:
+            if os.path.exists(filename):
+                with open(filename, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except:
+            pass
+        return None
+    
+    @staticmethod
+    def clear_progress(filename=PROGRESS_FILE):
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+        except:
+            pass
+
+
+# ============================================================================
+# SMART PLAYLIST CREATOR
+# ============================================================================
+
+class SmartPlaylistCreator:
+    @staticmethod
+    def create_popularity_playlists(plex_server, matches, log_callback=None):
+        tiers = {
+            "🔥 Top Hits (80-100)": [],
+            "⭐ Popular (60-79)": [],
+            "👍 Good (40-59)": [],
+            "📀 Deep Cuts (0-39)": []
+        }
+        for match in matches:
+            popularity = match['popularity']
+            track = match['plex_track']
+            if popularity >= 80:
+                tiers["🔥 Top Hits (80-100)"].append(track)
+            elif popularity >= 60:
+                tiers["⭐ Popular (60-79)"].append(track)
+            elif popularity >= 40:
+                tiers["👍 Good (40-59)"].append(track)
+            else:
+                tiers["📀 Deep Cuts (0-39)"].append(track)
+        
+        created = []
+        for name, tracks in tiers.items():
+            if tracks:
+                try:
+                    for p in plex_server.playlists():
+                        if p.title == name:
+                            p.delete()
+                    plex_server.createPlaylist(name, items=tracks[:500])
+                    created.append((name, len(tracks[:500])))
+                    if log_callback:
+                        log_callback(f"✓ Created '{name}' with {len(tracks[:500])} tracks")
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"✗ Failed to create '{name}': {e}")
+        return created
+
+
+# ============================================================================
+# AUDIO FORMAT HANDLER (ALAC Support)
+# ============================================================================
+
+class AudioFormatHandler:
+    CODECS = {
+        'alac': {'name': 'ALAC', 'lossless': True, 'bit_depth': '16-24bit'},
+        'flac': {'name': 'FLAC', 'lossless': True, 'bit_depth': '16-24bit'},
+        'wav': {'name': 'WAV', 'lossless': True, 'bit_depth': '16-24bit'},
+        'aiff': {'name': 'AIFF', 'lossless': True, 'bit_depth': '16-24bit'},
+        'dsd': {'name': 'DSD', 'lossless': True, 'bit_depth': '1bit'},
+        'mp3': {'name': 'MP3', 'lossless': False, 'bit_depth': 'lossy'},
+        'aac': {'name': 'AAC', 'lossless': False, 'bit_depth': 'lossy'},
+        'ogg': {'name': 'OGG', 'lossless': False, 'bit_depth': 'lossy'},
+        'm4a': {'name': 'M4A', 'lossless': False, 'bit_depth': 'lossy'},
+        'opus': {'name': 'Opus', 'lossless': False, 'bit_depth': 'lossy'},
+    }
+    
+    @classmethod
+    def get_track_codec(cls, track):
+        try:
+            if hasattr(track, 'media'):
+                for media in track.media:
+                    for part in media.parts:
+                        if hasattr(part, 'audioCodec'):
+                            return part.audioCodec.lower()
+            if hasattr(track, 'locations') and track.locations:
+                ext = os.path.splitext(track.locations[0])[1].lower()
+                return ext[1:] if ext else 'unknown'
+        except:
+            pass
+        return 'unknown'
+    
+    @classmethod
+    def is_lossless(cls, track):
+        codec = cls.get_track_codec(track)
+        return cls.CODECS.get(codec, {}).get('lossless', False)
+    
+    @classmethod
+    def get_codec_info(cls, track):
+        codec = cls.get_track_codec(track)
+        return cls.CODECS.get(codec, {'name': codec.upper(), 'lossless': False, 'bit_depth': 'unknown'})
+    
+    @classmethod
+    def filter_lossless(cls, tracks):
+        return [t for t in tracks if cls.is_lossless(t)]
+    
+    @classmethod
+    def get_format_stats(cls, tracks):
+        stats = {}
+        for track in tracks:
+            codec = cls.get_track_codec(track)
+            info = cls.CODECS.get(codec, {'name': codec.upper(), 'lossless': False})
+            name = info['name']
+            if name not in stats:
+                stats[name] = {'count': 0, 'lossless': info['lossless']}
+            stats[name]['count'] += 1
+        return stats
+
+
+# ============================================================================
+# OPTIMIZED LIBRARY LOADER
+# ============================================================================
+
+class OptimizedLibraryLoader:
+    """Faster Plex library loading with caching and batch operations"""
+    
+    def __init__(self, plex_server):
+        self.plex = plex_server
+        self.cache = {}
+        self.batch_size = 100
+        
+    def get_all_tracks_fast(self, library, track_filter=None):
+        """Get all tracks from a library using optimized methods"""
+        cache_key = f"tracks_{library.key if hasattr(library, 'key') else str(library)}_{hash(str(track_filter))}"
+        
+        # Check cache first
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        tracks = []
+        
+        try:
+            # Method 1: Use search with limit and offset for pagination
+            offset = 0
+            while True:
+                try:
+                    batch = self.plex.library.search(
+                        libtype='track',
+                        limit=self.batch_size,
+                        offset=offset
+                    )
+                    
+                    if not batch:
+                        break
+                        
+                    tracks.extend(batch)
+                    offset += self.batch_size
+                    
+                    # Early exit if we have enough tracks and no filter
+                    if track_filter is None and len(tracks) >= 10000:
+                        break
+                except:
+                    break
+                    
+            # Method 2: Fallback to album iteration if search doesn't work
+            if not tracks:
+                for album in library.albums():
+                    try:
+                        album_tracks = list(album.tracks())
+                        tracks.extend(album_tracks)
+                    except:
+                        continue
+                        
+        except Exception as e:
+            # Fallback to original method
+            for album in library.albums():
+                try:
+                    album_tracks = list(album.tracks())
+                    tracks.extend(album_tracks)
+                except:
+                    continue
+        
+        # Cache the results
+        self.cache[cache_key] = tracks
+        return tracks
+    
+    def clear_cache(self):
+        """Clear the cache to free memory"""
+        self.cache.clear()
+
+
+# ============================================================================
+# FAST LIBRARY LOADER THREAD
+# ============================================================================
+
+class FastLibraryLoaderThread(QThread):
     items_loaded = pyqtSignal(list, str)
     error_occurred = pyqtSignal(str)
     progress_update = pyqtSignal(str)
     
-    def __init__(self, plex_server, selection_type):
+    def __init__(self, plex_server, selection_type, specific_library=None):
         super().__init__()
         self.plex = plex_server
         self.selection_type = selection_type
+        self.specific_library = specific_library
+        self.loader = OptimizedLibraryLoader(plex_server)
         
     def run(self):
         try:
             items = []
             
-            # Find music section
-            music_section = None
-            for section in self.plex.library.sections():
-                if section.type == 'artist':
-                    music_section = section
-                    break
+            if self.specific_library:
+                music_section = self.specific_library
+            else:
+                music_section = None
+                for section in self.plex.library.sections():
+                    if section.type == 'artist':
+                        music_section = section
+                        break
             
             if not music_section:
                 self.error_occurred.emit("No music library found!")
@@ -86,76 +403,74 @@ class LibraryLoaderThread(QThread):
                     playlists = self.plex.playlists()
                     for playlist in playlists:
                         if hasattr(playlist, 'playlistType') and playlist.playlistType == 'audio':
-                            try:
-                                item_count = len(playlist.items())
-                            except:
-                                item_count = "?"
-                            
                             items.append({
                                 'title': playlist.title,
                                 'type': 'playlist',
                                 'object': playlist,
-                                'count': str(item_count)
+                                'count': '?'
                             })
                     self.progress_update.emit(f"Loaded {len(items)} playlists")
                 except Exception as e:
                     self.error_occurred.emit(f"Could not load playlists: {str(e)}")
                     
             elif self.selection_type == "album":
-                self.progress_update.emit("Loading albums...")
+                self.progress_update.emit(f"Loading albums from '{music_section.title}'...")
                 try:
-                    albums = list(music_section.albums())
+                    albums = music_section.albums()
+                    album_list = []
                     for album in albums:
-                        try:
-                            track_count = len(album.tracks())
-                        except:
-                            track_count = "?"
-                        
+                        album_list.append(album)
+                        if len(album_list) >= 500:
+                            break
+                    
+                    for album in album_list:
                         artist_name = album.parentTitle if hasattr(album, 'parentTitle') else "Unknown"
-                        
                         items.append({
                             'title': album.title,
                             'artist': artist_name,
                             'type': 'album',
                             'object': album,
-                            'count': str(track_count)
+                            'count': '?'
                         })
                     self.progress_update.emit(f"Loaded {len(items)} albums")
                 except Exception as e:
                     self.error_occurred.emit(f"Could not load albums: {str(e)}")
                     
             elif self.selection_type == "artist":
-                self.progress_update.emit("Loading artists...")
+                self.progress_update.emit(f"Loading artists from '{music_section.title}'...")
                 try:
-                    artists = list(music_section.all())
+                    artists = music_section.all()
+                    artist_list = []
                     for artist in artists:
-                        try:
-                            album_count = len(artist.albums())
-                        except:
-                            album_count = "?"
-                        
+                        artist_list.append(artist)
+                        if len(artist_list) >= 500:
+                            break
+                    
+                    for artist in artist_list:
                         items.append({
                             'title': artist.title,
                             'type': 'artist',
                             'object': artist,
-                            'count': str(album_count)
+                            'count': '?'
                         })
                     self.progress_update.emit(f"Loaded {len(items)} artists")
                 except Exception as e:
                     self.error_occurred.emit(f"Could not load artists: {str(e)}")
             
             self.items_loaded.emit(items, self.selection_type)
-            
         except Exception as e:
             self.error_occurred.emit(f"Error loading items: {str(e)}")
 
 
-class LibrarySelectorDialog(QDialog):
-    """Dialog for selecting playlists, albums, or artists"""
-    
-    def __init__(self, plex_server, parent=None):
+# ============================================================================
+# FAST LIBRARY SELECTOR DIALOG
+# ============================================================================
+
+class FastLibrarySelectorDialog(QDialog):
+    def __init__(self, plex_server, parent=None, specific_library=None):
         super().__init__(parent)
         self.plex = plex_server
+        self.specific_library = specific_library
         self.selected_items = []
         self.selection_type = "playlist"
         self.all_items = []
@@ -164,15 +479,12 @@ class LibrarySelectorDialog(QDialog):
         self.load_items()
         
     def init_ui(self):
-        self.setWindowTitle("Select Library Items")
+        self.setWindowTitle("Select Library Items (Fast Mode)")
         self.setMinimumSize(900, 600)
-        
         layout = QVBoxLayoutDialog()
         
-        # Selection type
         type_group = QGroupBox("Select Type")
         type_layout = QHBoxLayout()
-        
         self.type_group = QButtonGroup()
         
         self.playlist_radio = QRadioButton("Playlists")
@@ -195,7 +507,6 @@ class LibrarySelectorDialog(QDialog):
         type_group.setLayout(type_layout)
         layout.addWidget(type_group)
         
-        # Search
         search_layout = QHBoxLayout()
         search_layout.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
@@ -203,119 +514,48 @@ class LibrarySelectorDialog(QDialog):
         search_layout.addWidget(self.search_input)
         layout.addLayout(search_layout)
         
-        # Loading indicator
         self.loading_label = QLabel("Loading items...")
         self.loading_label.setStyleSheet("color: #ffa500; font-style: italic;")
         self.loading_label.hide()
         layout.addWidget(self.loading_label)
         
-        # Tree widget
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Name", "Artist/Info", "Tracks"])
+        self.tree.setHeaderLabels(["Name", "Info"])
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self.show_context_menu)
         layout.addWidget(self.tree)
         
-        # Selection info
         self.selection_info = QLabel("Selected: 0 items")
         layout.addWidget(self.selection_info)
         
-        # Quick select buttons
         quick_layout = QHBoxLayout()
-        
         select_all_btn = QPushButton("Select All")
         select_all_btn.clicked.connect(self.select_all)
         quick_layout.addWidget(select_all_btn)
-        
         clear_btn = QPushButton("Clear All")
         clear_btn.clicked.connect(self.clear_selection)
         quick_layout.addWidget(clear_btn)
-        
-        invert_btn = QPushButton("Invert Selection")
-        invert_btn.clicked.connect(self.invert_selection)
-        quick_layout.addWidget(invert_btn)
-        
         quick_layout.addStretch()
         layout.addLayout(quick_layout)
         
-        # Separator
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("background-color: #555555;")
-        layout.addWidget(line)
-        
-        # Action buttons
         button_layout = QHBoxLayout()
         button_layout.addStretch()
-        
         ok_btn = QPushButton("OK")
         ok_btn.clicked.connect(self.accept)
         ok_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold; padding: 10px 30px;")
         button_layout.addWidget(ok_btn)
-        
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
-        
         layout.addLayout(button_layout)
         
         self.setLayout(layout)
-        
-        self.setStyleSheet("""
-            QDialog { background-color: #2b2b2b; }
-            QLabel { color: #ffffff; }
-            QGroupBox {
-                color: #ffffff;
-                border: 2px solid #555555;
-                border-radius: 5px;
-                margin-top: 10px;
-                font-weight: bold;
-                padding: 15px;
-            }
-            QRadioButton { color: #ffffff; padding: 5px; }
-            QTreeWidget {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                gridline-color: #555555;
-                font-size: 12px;
-            }
-            QTreeWidget::item { padding: 5px; }
-            QTreeWidget::item:selected { background-color: #00a8ff; }
-            QTreeWidget::item:hover { background-color: #3c3c3c; }
-            QHeaderView::section {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                padding: 8px;
-                border: 1px solid #555555;
-            }
-            QLineEdit {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555555;
-                padding: 8px;
-                border-radius: 3px;
-            }
-            QPushButton {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555555;
-                padding: 8px 16px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
     
     def load_items(self):
         self.tree.clear()
         self.loading_label.show()
         self.search_input.setEnabled(False)
         
-        self.playlist_radio.setEnabled(False)
-        self.album_radio.setEnabled(False)
-        self.artist_radio.setEnabled(False)
-        
-        self.loader_thread = LibraryLoaderThread(self.plex, self.selection_type)
+        self.loader_thread = FastLibraryLoaderThread(self.plex, self.selection_type, self.specific_library)
         self.loader_thread.items_loaded.connect(self.on_items_loaded)
         self.loader_thread.error_occurred.connect(self.on_error)
         self.loader_thread.progress_update.connect(self.loading_label.setText)
@@ -327,23 +567,11 @@ class LibrarySelectorDialog(QDialog):
         
         for item_data in items:
             if selection_type == "playlist":
-                item = QTreeWidgetItem([
-                    item_data['title'],
-                    "-",
-                    item_data['count']
-                ])
+                item = QTreeWidgetItem([item_data['title'], f"{item_data['count']} tracks"])
             elif selection_type == "album":
-                item = QTreeWidgetItem([
-                    item_data['title'],
-                    item_data.get('artist', 'Unknown'),
-                    item_data['count']
-                ])
-            else:  # artist
-                item = QTreeWidgetItem([
-                    item_data['title'],
-                    f"{item_data['count']} albums",
-                    "-"
-                ])
+                item = QTreeWidgetItem([item_data['title'], f"{item_data.get('artist', 'Unknown')} ({item_data['count']} tracks)"])
+            else:
+                item = QTreeWidgetItem([item_data['title'], f"{item_data['count']} albums"])
             
             item.setData(0, Qt.ItemDataRole.UserRole, {
                 'type': item_data['type'],
@@ -352,24 +580,14 @@ class LibrarySelectorDialog(QDialog):
             })
             self.tree.addTopLevelItem(item)
         
-        for i in range(3):
-            self.tree.resizeColumnToContents(i)
-        
+        self.tree.resizeColumnToContents(0)
         self.loading_label.hide()
         self.search_input.setEnabled(True)
-        
-        self.playlist_radio.setEnabled(True)
-        self.album_radio.setEnabled(True)
-        self.artist_radio.setEnabled(True)
-        
         self.update_selection_info()
     
     def on_error(self, error_msg):
         self.loading_label.hide()
         self.search_input.setEnabled(True)
-        self.playlist_radio.setEnabled(True)
-        self.album_radio.setEnabled(True)
-        self.artist_radio.setEnabled(True)
         QMessageBox.critical(self, "Error", error_msg)
     
     def on_type_changed(self, type_name):
@@ -379,31 +597,9 @@ class LibrarySelectorDialog(QDialog):
     
     def filter_items(self):
         search_text = self.search_input.text().lower()
-        
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
-            match = search_text in item.text(0).lower()
-            if not match and self.selection_type == "album":
-                match = search_text in item.text(1).lower()
-            item.setHidden(not match)
-    
-    def show_context_menu(self, position):
-        menu = QMenu()
-        
-        select_action = QAction("Select", self)
-        select_action.triggered.connect(lambda: self.set_selected(True))
-        menu.addAction(select_action)
-        
-        deselect_action = QAction("Deselect", self)
-        deselect_action.triggered.connect(lambda: self.set_selected(False))
-        menu.addAction(deselect_action)
-        
-        menu.exec(self.tree.viewport().mapToGlobal(position))
-    
-    def set_selected(self, select=True):
-        for item in self.tree.selectedItems():
-            item.setSelected(select)
-        self.update_selection_info()
+            item.setHidden(search_text not in item.text(0).lower())
     
     def select_all(self):
         for i in range(self.tree.topLevelItemCount()):
@@ -414,13 +610,6 @@ class LibrarySelectorDialog(QDialog):
     
     def clear_selection(self):
         self.tree.clearSelection()
-        self.update_selection_info()
-    
-    def invert_selection(self):
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if not item.isHidden():
-                item.setSelected(not item.isSelected())
         self.update_selection_info()
     
     def update_selection_info(self):
@@ -436,224 +625,428 @@ class LibrarySelectorDialog(QDialog):
         return selected
 
 
-class DuplicateTrackHandler:
-    """Handles duplicate track detection and prefers original release years"""
-    
-    @staticmethod
-    def normalize_title(title: str) -> str:
-        """Normalize track title by removing version suffixes"""
-        title_lower = title.lower().strip()
+# ============================================================================
+# FORMAT FILTER DIALOG
+# ============================================================================
+
+class FormatFilterDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🎵 Audio Format Filter")
+        self.setMinimumSize(400, 350)
+        self.init_ui()
         
-        suffixes = [
-            ' (remastered', ' (remaster', ' (deluxe', ' (expanded',
-            ' (bonus track', ' (bonus)', ' (live)', ' (live',
-            ' (acoustic)', ' (acoustic', ' (demo)', ' (demo',
-            ' (single)', ' (single', ' (radio edit)', ' (radio edit',
-            ' (album version)', ' (album version', ' - remastered',
-            ' [remastered]', ' [live]', ' (original)', ' [original]'
+    def init_ui(self):
+        layout = QVBoxLayoutDialog()
+        
+        layout.addWidget(QLabel("<h3>Filter by Audio Format</h3>"))
+        layout.addWidget(QLabel("<hr>"))
+        
+        self.lossless_only = QCheckBox("🎵 Lossless Only (ALAC, FLAC, WAV, AIFF, DSD)")
+        self.lossless_only.setChecked(False)
+        layout.addWidget(self.lossless_only)
+        
+        layout.addWidget(QLabel("<br><b>Specific Formats:</b>"))
+        
+        self.format_checks = {}
+        formats = [
+            ('alac', '🍎 ALAC (Apple Lossless)'),
+            ('flac', '🎵 FLAC (Free Lossless)'),
+            ('wav', '📀 WAV (Uncompressed)'),
+            ('aiff', '🍎 AIFF (Apple Uncompressed)'),
+            ('mp3', '🎵 MP3 (Lossy)'),
+            ('aac', '🎵 AAC (Lossy)'),
+            ('m4a', '🍎 M4A (AAC/ALAC)'),
         ]
         
+        for codec, label in formats:
+            cb = QCheckBox(label)
+            cb.setChecked(False)
+            self.format_checks[codec] = cb
+            layout.addWidget(cb)
+        
+        layout.addWidget(QLabel("<hr>"))
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        apply_btn = QPushButton("Apply Filter")
+        apply_btn.clicked.connect(self.accept)
+        apply_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold;")
+        btn_layout.addWidget(apply_btn)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
+    
+    def get_selected_formats(self):
+        selected = []
+        for codec, cb in self.format_checks.items():
+            if cb.isChecked():
+                selected.append(codec)
+        return selected
+    
+    def is_lossless_only(self):
+        return self.lossless_only.isChecked()
+
+
+# ============================================================================
+# STATISTICS DIALOG
+# ============================================================================
+
+class StatsDialog(QDialog):
+    def __init__(self, matches, parent=None):
+        super().__init__(parent)
+        self.matches = matches
+        self.setWindowTitle("📊 Library Statistics")
+        self.setMinimumSize(600, 450)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayoutDialog()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        
+        total_tracks = len(self.matches)
+        avg_popularity = sum(m['popularity'] for m in self.matches) / total_tracks if total_tracks else 0
+        
+        summary = QLabel(f"""
+        <h2>📊 Library Statistics</h2>
+        <hr>
+        <p><b>Total Matched Tracks:</b> {total_tracks}</p>
+        <p><b>Average Popularity:</b> {avg_popularity:.1f}</p>
+        <hr>
+        <h3>Popularity Distribution:</h3>
+        """)
+        summary.setWordWrap(True)
+        scroll_layout.addWidget(summary)
+        
+        tiers = {'🔥 Top Hits (80-100)': 0, '⭐ Popular (60-79)': 0, 
+                 '👍 Good (40-59)': 0, '📀 Deep Cuts (0-39)': 0}
+        artist_tracks = {}
+        
+        for match in self.matches:
+            pop = match['popularity']
+            if pop >= 80:
+                tiers['🔥 Top Hits (80-100)'] += 1
+            elif pop >= 60:
+                tiers['⭐ Popular (60-79)'] += 1
+            elif pop >= 40:
+                tiers['👍 Good (40-59)'] += 1
+            else:
+                tiers['📀 Deep Cuts (0-39)'] += 1
+            try:
+                artist = match['plex_track'].artist().title if match['plex_track'].artist() else 'Unknown'
+                artist_tracks[artist] = artist_tracks.get(artist, 0) + 1
+            except:
+                pass
+        
+        for tier, count in tiers.items():
+            pct = (count / total_tracks * 100) if total_tracks else 0
+            scroll_layout.addWidget(QLabel(f"  {tier}: {count} tracks ({pct:.1f}%)"))
+        
+        scroll_layout.addWidget(QLabel("<hr><h3>Top 10 Artists:</h3>"))
+        sorted_artists = sorted(artist_tracks.items(), key=lambda x: x[1], reverse=True)[:10]
+        for i, (artist, count) in enumerate(sorted_artists, 1):
+            scroll_layout.addWidget(QLabel(f"  {i}. {artist}: {count} tracks"))
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        layout.addWidget(scroll)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setStyleSheet("background-color: #00a8ff; padding: 10px;")
+        layout.addWidget(close_btn)
+        self.setLayout(layout)
+
+
+# ============================================================================
+# TIDAL ACCOUNT DIALOG
+# ============================================================================
+
+class TidalAccountDialog(QDialog):
+    def __init__(self, tidal_session, parent=None):
+        super().__init__(parent)
+        self.session = tidal_session
+        self.setWindowTitle("🌊 Tidal Account")
+        self.setMinimumSize(450, 300)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayoutDialog()
+        try:
+            user = self.session.user
+            layout.addWidget(QLabel(f"<h2>🌊 {user.username}</h2>"))
+            layout.addWidget(QLabel("<hr>"))
+            info = QLabel(f"""
+            <p><b>Email:</b> {user.email}</p>
+            <p><b>Country:</b> {user.country}</p>
+            <p><b>Account ID:</b> {user.id}</p>
+            <p><b>Subscription:</b> {user.subscription.type.capitalize()}</p>
+            """)
+            info.setWordWrap(True)
+            layout.addWidget(info)
+        except Exception as e:
+            layout.addWidget(QLabel(f"<p style='color: #ff6b6b;'>Error: {e}</p>"))
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setStyleSheet("background-color: #00a8ff; padding: 10px;")
+        layout.addWidget(close_btn)
+        self.setLayout(layout)
+
+
+# ============================================================================
+# PLAYLIST CREATION DIALOG
+# ============================================================================
+
+class PlaylistCreationDialog(QDialog):
+    def __init__(self, plex_server, matches, parent=None):
+        super().__init__(parent)
+        self.plex = plex_server
+        self.matches = matches
+        self.setWindowTitle("🎵 Create Smart Playlists")
+        self.setMinimumSize(450, 300)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayoutDialog()
+        layout.addWidget(QLabel(f"<h3>Create Smart Playlists</h3>"))
+        layout.addWidget(QLabel(f"<p>Based on {len(self.matches)} matched tracks</p>"))
+        layout.addWidget(QLabel("<hr>"))
+        
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setMaximumHeight(200)
+        layout.addWidget(self.log_output)
+        
+        create_btn = QPushButton("🎵 Create Popularity Playlists")
+        create_btn.clicked.connect(self.create_playlists)
+        create_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold; padding: 12px;")
+        layout.addWidget(create_btn)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+        self.setLayout(layout)
+    
+    def log(self, msg):
+        self.log_output.append(msg)
+        QApplication.processEvents()
+    
+    def create_playlists(self):
+        self.log_output.clear()
+        self.log("Creating playlists...")
+        SmartPlaylistCreator.create_popularity_playlists(self.plex, self.matches, self.log)
+        self.log("\n✅ Done!")
+
+
+# ============================================================================
+# PROGRESS DIALOG
+# ============================================================================
+
+class ProgressDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📁 Progress Management")
+        self.setMinimumSize(500, 300)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayoutDialog()
+        progress = ProgressManager.load_progress()
+        
+        if progress:
+            layout.addWidget(QLabel(f"<h3>Saved Progress Found</h3>"))
+            layout.addWidget(QLabel(f"<b>Saved:</b> {progress.get('timestamp', 'Unknown')}"))
+            layout.addWidget(QLabel(f"<b>Matches:</b> {progress.get('matches_count', 0)} tracks"))
+            layout.addWidget(QLabel("<hr>"))
+            
+            btn_layout = QHBoxLayout()
+            load_btn = QPushButton("📂 Load Progress")
+            load_btn.clicked.connect(self.accept)
+            load_btn.setStyleSheet("background-color: #00a8ff;")
+            btn_layout.addWidget(load_btn)
+            
+            clear_btn = QPushButton("🗑️ Clear Progress")
+            clear_btn.clicked.connect(self.clear_progress)
+            clear_btn.setStyleSheet("background-color: #8b0000;")
+            btn_layout.addWidget(clear_btn)
+            
+            cancel_btn = QPushButton("Cancel")
+            cancel_btn.clicked.connect(self.reject)
+            btn_layout.addWidget(cancel_btn)
+            layout.addLayout(btn_layout)
+        else:
+            layout.addWidget(QLabel("<h3>No Saved Progress</h3>"))
+            layout.addWidget(QLabel("<p>No previous matching progress found.</p>"))
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(self.reject)
+            layout.addWidget(close_btn)
+        
+        self.setLayout(layout)
+    
+    def clear_progress(self):
+        reply = QMessageBox.question(self, "Confirm", "Clear saved progress?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            ProgressManager.clear_progress()
+            self.reject()
+
+
+# ============================================================================
+# LIBRARY SELECTOR
+# ============================================================================
+
+class LibrarySelector(QDialog):
+    def __init__(self, plex_server, parent=None):
+        super().__init__(parent)
+        self.plex = plex_server
+        self.selected_library = None
+        self.music_libraries = []
+        self.init_ui()
+        self.load_libraries()
+        
+    def init_ui(self):
+        self.setWindowTitle("Select Music Library")
+        self.setMinimumSize(500, 300)
+        layout = QVBoxLayoutDialog()
+        layout.addWidget(QLabel("<h3>Select Music Library</h3>"))
+        layout.addWidget(QLabel("<p>Choose which Plex music library to use:</p>"))
+        layout.addWidget(QLabel("<hr>"))
+        
+        self.library_list = QListWidget()
+        self.library_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.library_list.itemDoubleClicked.connect(self.accept)
+        layout.addWidget(self.library_list)
+        
+        self.info_label = QLabel("")
+        self.info_label.setStyleSheet("color: #888888; font-style: italic; padding: 5px;")
+        layout.addWidget(self.info_label)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        select_btn = QPushButton("Select Library")
+        select_btn.clicked.connect(self.accept)
+        select_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold;")
+        btn_layout.addWidget(select_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        self.setLayout(layout)
+        self.library_list.itemSelectionChanged.connect(self.update_info)
+    
+    def load_libraries(self):
+        try:
+            sections = self.plex.library.sections()
+            for section in sections:
+                if section.type == 'artist':
+                    self.music_libraries.append(section)
+                    try:
+                        artist_count = len(section.all())
+                        album_count = len(section.albums())
+                        item_text = f"{section.title}\n  Artists: {artist_count} | Albums: {album_count}"
+                    except:
+                        item_text = section.title
+                    item = QListWidgetItem(item_text)
+                    item.setData(Qt.ItemDataRole.UserRole, section)
+                    self.library_list.addItem(item)
+            
+            if self.music_libraries:
+                self.library_list.setCurrentRow(0)
+            else:
+                self.info_label.setText("⚠️ No music libraries found!")
+                self.info_label.setStyleSheet("color: #ff6b6b;")
+        except Exception as e:
+            self.info_label.setText(f"Error loading libraries: {e}")
+            self.info_label.setStyleSheet("color: #ff6b6b;")
+    
+    def update_info(self):
+        current = self.library_list.currentItem()
+        if current:
+            library = current.data(Qt.ItemDataRole.UserRole)
+            self.selected_library = library
+            try:
+                track_count = sum(len(album.tracks()) for album in library.albums())
+                self.info_label.setText(f"Selected: {library.title} - ~{track_count} tracks")
+                self.info_label.setStyleSheet("color: #51cf66; font-style: normal;")
+            except:
+                self.info_label.setText(f"Selected: {library.title}")
+                self.info_label.setStyleSheet("color: #51cf66; font-style: normal;")
+    
+    def get_selected_library(self):
+        return self.selected_library
+
+
+# ============================================================================
+# DUPLICATE HANDLER
+# ============================================================================
+
+class DuplicateTrackHandler:
+    @staticmethod
+    def normalize_title(title: str) -> str:
+        title_lower = title.lower().strip()
+        suffixes = [' (remastered', ' (remaster', ' (deluxe', ' (live)', ' (live']
         for suffix in suffixes:
             if suffix in title_lower:
                 title_lower = title_lower.split(suffix)[0].strip()
-        
-        while title_lower.endswith(')') or title_lower.endswith(']'):
-            if '(' in title_lower:
-                title_lower = title_lower[:title_lower.rfind('(')].strip()
-            elif '[' in title_lower:
-                title_lower = title_lower[:title_lower.rfind('[')].strip()
-            else:
-                break
-        
         return title_lower
     
     @staticmethod
-    def get_album_year(track) -> Optional[int]:
-        """Get the release year of a track's album"""
-        try:
-            if hasattr(track, 'album') and track.album():
-                album = track.album()
-                
-                if hasattr(album, 'year') and album.year:
-                    return int(album.year)
-                elif hasattr(album, 'originallyAvailableAt') and album.originallyAvailableAt:
-                    return album.originallyAvailableAt.year
-                elif hasattr(album, 'releaseDate') and album.releaseDate:
-                    if isinstance(album.releaseDate, str):
-                        return int(album.releaseDate[:4])
-                    else:
-                        return album.releaseDate.year
-        except:
-            pass
-        return None
-    
-    @staticmethod
-    def score_track_version(track) -> Tuple[int, Optional[int], str]:
-        """Score a track version - higher score = better (more likely original)"""
-        score = 0
-        year = DuplicateTrackHandler.get_album_year(track)
-        title_lower = track.title.lower()
-        album_name = ""
-        
-        try:
-            if track.album():
-                album_name = track.album().title.lower()
-        except:
-            pass
-        
-        if year:
-            score += (2030 - year) * 10
-        else:
-            score -= 1000
-        
-        bad_words = ['remaster', 'deluxe', 'expanded', 'bonus', 'live', 
-                    'acoustic', 'demo', 'alternate', 'instrumental', 'karaoke']
-        for word in bad_words:
-            if word in title_lower:
-                score -= 500
-            if word in album_name:
-                score -= 300
-        
-        good_words = ['original', 'first pressing', 'standard']
-        for word in good_words:
-            if word in title_lower or word in album_name:
-                score += 200
-        
-        score -= len(title_lower) * 2
-        
-        return (score, year, title_lower)
-    
-    @staticmethod
-    def group_tracks_by_title_and_artist(tracks: List) -> Dict[str, List]:
-        """Group tracks by normalized title and artist"""
+    def deduplicate_tracks(tracks: List, log_callback=None) -> List:
+        if not tracks:
+            return []
         groups = {}
-        
         for track in tracks:
             try:
                 artist = track.artist().title.lower().strip() if track.artist() else "unknown"
                 title = DuplicateTrackHandler.normalize_title(track.title)
                 key = f"{artist}|||{title}"
-                
                 if key not in groups:
                     groups[key] = []
                 groups[key].append(track)
             except:
                 continue
-                
-        return groups
-    
-    @staticmethod
-    def select_best_version(tracks: List):
-        """Select the best version from duplicate tracks"""
-        if len(tracks) <= 1:
-            return tracks[0] if tracks else None
-        
-        scored = [(DuplicateTrackHandler.score_track_version(t), t) for t in tracks]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        
-        return scored[0][1] if scored else tracks[0]
-    
-    @staticmethod
-    def deduplicate_tracks(tracks: List, log_callback=None) -> List:
-        """Remove duplicates, keeping only the best version of each song"""
-        if not tracks:
-            return []
-        
-        groups = DuplicateTrackHandler.group_tracks_by_title_and_artist(tracks)
-        
-        unique_tracks = []
-        duplicates_removed = 0
-        
-        for key, group in groups.items():
+        unique = []
+        duplicates = 0
+        for group in groups.values():
             if len(group) > 1:
-                duplicates_removed += len(group) - 1
-                best = DuplicateTrackHandler.select_best_version(group)
-                unique_tracks.append(best)
-                
-                if log_callback:
-                    try:
-                        artist, title = key.split('|||', 1)
-                        year = DuplicateTrackHandler.get_album_year(best)
-                        album = best.album().title if best.album() else "Unknown"
-                        log_callback(f"  Selected: {artist} - {title} ({album}, {year}) from {len(group)} versions")
-                    except:
-                        pass
-            else:
-                unique_tracks.append(group[0])
-        
-        if log_callback and duplicates_removed > 0:
-            log_callback(f"Deduplication: {len(tracks)} -> {len(unique_tracks)} tracks ({duplicates_removed} duplicates removed)")
-        
-        return unique_tracks
+                duplicates += len(group) - 1
+            unique.append(group[0])
+        if log_callback and duplicates > 0:
+            log_callback(f"Deduplication: removed {duplicates} duplicates")
+        return unique
 
 
-class TidalLoginThread(QThread):
-    """Thread for handling Tidal OAuth login"""
-    
-    login_success = pyqtSignal(object)
-    login_error = pyqtSignal(str)
-    log_signal = pyqtSignal(str)
-    auth_url_signal = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.session = None
-        self.login = None
-        self.future = None
-        
-    def run(self):
-        try:
-            self.log_signal.emit("Creating Tidal session...")
-            self.session = tidalapi.Session()
-            self.log_signal.emit("Starting OAuth flow...")
-            
-            self.login, self.future = self.session.login_oauth()
-            auth_url = self.login.verification_uri_complete
-            self.log_signal.emit("Authentication required")
-            self.auth_url_signal.emit(auth_url)
-            self.log_signal.emit("Waiting for authentication (2 minutes max)...")
-            
-            for i in range(120):
-                if self.future.done():
-                    break
-                time.sleep(1)
-            
-            if self.future.done():
-                self.future.result()
-                if self.session.check_login():
-                    self.log_signal.emit("Login successful!")
-                    self.login_success.emit(self.session)
-                else:
-                    self.login_error.emit("Login verification failed")
-            else:
-                self.login_error.emit("Login timeout - please try again")
-                
-        except Exception as e:
-            self.log_signal.emit(f"Login error: {str(e)}")
-            self.login_error.emit(str(e))
-    
-    def cancel(self):
-        if self.future and not self.future.done():
-            self.future.cancel()
+# ============================================================================
+# FAST MATCHING THREAD
+# ============================================================================
 
-
-class MatchingThread(QThread):
-    """Worker thread for matching Plex songs with Tidal"""
-    
+class FastMatchingThread(QThread):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int, int)
     match_found_signal = pyqtSignal(dict)
     status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(list)
     
-    def __init__(self, plex_server, tidal_session, options, selected_items=None):
+    def __init__(self, plex_server, tidal_session, options, selected_items=None, current_library=None):
         super().__init__()
         self.plex_server = plex_server
         self.tidal_session = tidal_session
         self.options = options
         self.selected_items = selected_items
+        self.current_library = current_library
         self.is_running = True
         self.matches = []
+        self.loader = OptimizedLibraryLoader(plex_server)
         
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -661,103 +1054,119 @@ class MatchingThread(QThread):
         
     def run(self):
         try:
-            self.log("Starting track collection...")
-            self.status_signal.emit("Collecting tracks...")
-            
+            self.log("Collecting tracks (optimized)...")
             all_tracks = []
             
-            # If specific items are selected, only process those
             if self.selected_items:
                 self.log(f"Processing {len(self.selected_items)} selected items...")
-                for item_data in self.selected_items:
-                    if not self.is_running:
-                        break
-                    
-                    try:
-                        if item_data['type'] == 'playlist':
-                            playlist = item_data['object']
-                            self.log(f"Loading playlist: {playlist.title}")
-                            tracks = list(playlist.items())
-                            all_tracks.extend(tracks)
-                            self.log(f"  Added {len(tracks)} tracks from playlist")
-                            
-                        elif item_data['type'] == 'album':
-                            album = item_data['object']
-                            self.log(f"Loading album: {album.title}")
-                            tracks = list(album.tracks())
-                            all_tracks.extend(tracks)
-                            self.log(f"  Added {len(tracks)} tracks from album")
-                            
-                        elif item_data['type'] == 'artist':
-                            artist = item_data['object']
-                            self.log(f"Loading artist: {artist.title}")
-                            tracks = list(artist.tracks())
-                            all_tracks.extend(tracks)
-                            self.log(f"  Added {len(tracks)} tracks from artist")
-                    except Exception as e:
-                        self.log(f"Error loading item: {str(e)}")
-            else:
-                # Process entire library
-                music_sections = [s for s in self.plex_server.library.sections() if s.type == 'artist']
-                if not music_sections:
-                    self.log("No music library found!")
-                    return
                 
-                music_section = music_sections[0]
-                self.log(f"Found music library: {music_section.title}")
+                playlists = [item for item in self.selected_items if item['type'] == 'playlist']
+                albums = [item for item in self.selected_items if item['type'] == 'album']
+                artists = [item for item in self.selected_items if item['type'] == 'artist']
                 
-                if self.options.get('limit_artists', False):
-                    limit = self.options.get('artist_limit', 50)
-                    artists = list(music_section.all())[:limit]
-                    for artist in artists:
+                if playlists:
+                    self.log(f"Loading {len(playlists)} playlists...")
+                    for item in playlists:
+                        if not self.is_running:
+                            break
                         try:
-                            artist_tracks = list(artist.tracks())
-                            all_tracks.extend(artist_tracks)
-                            self.log(f"Loaded {len(artist_tracks)} tracks from {artist.title}")
-                        except:
-                            pass
+                            tracks = list(item['object'].items())
+                            all_tracks.extend(tracks)
+                            self.log(f"  Loaded {len(tracks)} tracks from playlist")
+                        except Exception as e:
+                            self.log(f"Error loading playlist: {str(e)}")
+                
+                if albums:
+                    self.log(f"Loading {len(albums)} albums...")
+                    for item in albums:
+                        if not self.is_running:
+                            break
+                        try:
+                            tracks = list(item['object'].tracks())
+                            all_tracks.extend(tracks)
+                        except Exception as e:
+                            self.log(f"Error loading album: {str(e)}")
+                
+                if artists:
+                    self.log(f"Loading {len(artists)} artists...")
+                    for item in artists:
+                        if not self.is_running:
+                            break
+                        try:
+                            tracks = list(item['object'].tracks())
+                            all_tracks.extend(tracks)
+                            self.log(f"  Loaded {len(tracks)} tracks from artist")
+                        except Exception as e:
+                            self.log(f"Error loading artist: {str(e)}")
+                            
+            else:
+                if self.current_library:
+                    music_section = self.current_library
+                    self.log(f"Using library: {music_section.title}")
                 else:
-                    try:
-                        for album in music_section.albums():
-                            try:
-                                all_tracks.extend(album.tracks())
-                            except:
-                                pass
-                    except Exception as e:
-                        self.log(f"Error fetching albums: {str(e)}")
+                    music_sections = [s for s in self.plex_server.library.sections() if s.type == 'artist']
+                    if not music_sections:
+                        self.log("No music library found!")
                         return
+                    music_section = music_sections[0]
+                    self.log(f"Found music library: {music_section.title}")
+                
+                self.log("Loading tracks from library (this may take a moment)...")
+                filter_params = {
+                    'filter_lossless': self.options.get('filter_lossless', False),
+                    'selected_formats': self.options.get('selected_formats', [])
+                }
+                
+                all_tracks = self.loader.get_all_tracks_fast(music_section, filter_params)
+                self.log(f"Loaded {len(all_tracks)} tracks")
             
-            original_count = len(all_tracks)
-            self.log(f"Found {original_count} total tracks")
+            if self.options.get('filter_lossless', False):
+                before = len(all_tracks)
+                all_tracks = AudioFormatHandler.filter_lossless(all_tracks)
+                self.log(f"Lossless filter: {before} -> {len(all_tracks)} tracks")
             
-            # Apply deduplication if enabled
+            if self.options.get('selected_formats'):
+                before = len(all_tracks)
+                filtered = []
+                codec_cache = {}
+                
+                for track in all_tracks:
+                    track_key = id(track)
+                    if track_key not in codec_cache:
+                        codec_cache[track_key] = AudioFormatHandler.get_track_codec(track)
+                    
+                    if codec_cache[track_key] in self.options['selected_formats']:
+                        filtered.append(track)
+                
+                all_tracks = filtered
+                self.log(f"Format filter: {before} -> {len(all_tracks)} tracks")
+            
             if self.options.get('deduplicate', True):
-                self.log("Deduplicating tracks (keeping original/best versions)...")
                 all_tracks = DuplicateTrackHandler.deduplicate_tracks(all_tracks, self.log)
             
-            total_tracks = len(all_tracks)
-            self.log(f"Processing {total_tracks} tracks")
+            total = len(all_tracks)
+            self.log(f"Processing {total} tracks...")
             
-            # Process tracks
+            artist_cache = {}
             matches = []
+            
             for idx, track in enumerate(all_tracks):
                 if not self.is_running:
                     break
-                    
-                self.progress_signal.emit(idx + 1, total_tracks)
+                
+                self.progress_signal.emit(idx + 1, total)
                 
                 try:
-                    artist_name = track.artist().title if track.artist() else "Unknown"
+                    track_id = id(track)
+                    if track_id not in artist_cache:
+                        artist_cache[track_id] = track.artist().title if track.artist() else "Unknown"
                 except:
                     continue
                 
-                self.status_signal.emit(f"Processing: {track.title} by {artist_name}")
+                if idx % 50 == 0:
+                    self.log(f"Processing {idx + 1}/{total}: {track.title}")
                 
-                if idx % 10 == 0:
-                    self.log(f"Processing {idx + 1}/{total_tracks}: {track.title}")
-                
-                # Search Tidal
-                tidal_match = self.search_tidal_track(track)
+                tidal_match = self.search_tidal_fast(track)
                 
                 if tidal_match:
                     popularity = getattr(tidal_match, 'popularity', 0)
@@ -765,98 +1174,48 @@ class MatchingThread(QThread):
                         'plex_track': track,
                         'tidal_track': tidal_match,
                         'popularity': popularity if popularity else 0,
-                        'match_score': self.calculate_match_score(track, tidal_match)
+                        'match_score': self.calculate_score(track, tidal_match)
                     }
                     matches.append(match_info)
                     self.match_found_signal.emit(match_info)
                     
-                    # Update rating if requested
-                    if self.options.get('update_ratings', False):
+                    if self.options.get('update_ratings'):
                         try:
-                            rating = min(10, max(0, popularity / 10))
-                            track.rate(rating)
+                            track.rate(min(10, max(0, popularity / 10)))
                         except:
                             pass
                     
-                    time.sleep(0.1)
+                    time.sleep(0.01)
             
             matches.sort(key=lambda x: x['popularity'], reverse=True)
-            
             self.log(f"Completed! Found {len(matches)} matches")
-            self.status_signal.emit(f"Complete - {len(matches)} matches found")
             self.finished_signal.emit(matches)
             
         except Exception as e:
-            self.log(f"Error: {str(e)}")
-            self.status_signal.emit(f"Error: {str(e)}")
+            self.log(f"Error: {e}")
+            import traceback
+            self.log(traceback.format_exc())
     
-    def search_tidal_track(self, plex_track):
+    def search_tidal_fast(self, plex_track):
         try:
-            artist_name = plex_track.artist().title if plex_track.artist() else ""
-            track_title = plex_track.title
-            query = f"{track_title} {artist_name}"
+            artist = plex_track.artist().title if plex_track.artist() else ""
+            query = f"{artist} {plex_track.title}"[:100]
             
-            search_results = self.tidal_session.search(query, models=[tidalapi.Track])
-            
-            if not search_results or 'tracks' not in search_results:
-                return None
-            
-            tracks = search_results['tracks']
-            if not tracks:
-                return None
-            
-            best_match = None
-            best_score = 0
-            
-            for tidal_track in tracks[:5]:
-                score = self.calculate_match_score(plex_track, tidal_track)
-                if score > best_score and score >= self.options.get('match_threshold', 70):
-                    best_score = score
-                    best_match = tidal_track
-            
-            if best_match and hasattr(best_match, 'id'):
-                try:
-                    full_track = self.tidal_session.track(best_match.id)
-                    if full_track:
-                        return full_track
-                except:
-                    pass
-            
-            return best_match
-                
+            results = self.tidal_session.search(query, models=[tidalapi.Track], limit=1)
+            if results and 'tracks' in results and results['tracks']:
+                return results['tracks'][0]
         except:
             pass
-            
         return None
     
-    def calculate_match_score(self, plex_track, tidal_track):
+    def calculate_score(self, plex_track, tidal_track):
         score = 0
         try:
-            plex_title = plex_track.title.lower().strip()
-            tidal_title = tidal_track.name.lower().strip()
-            
-            if plex_title == tidal_title:
+            if plex_track.title.lower() == tidal_track.name.lower():
                 score += 50
-            elif plex_title in tidal_title or tidal_title in plex_title:
-                score += 30
-            
             if plex_track.artist():
-                plex_artist = plex_track.artist().title.lower().strip()
-                tidal_artist = tidal_track.artist.name.lower().strip()
-                
-                if plex_artist == tidal_artist:
+                if plex_track.artist().title.lower() == tidal_track.artist.name.lower():
                     score += 50
-                elif plex_artist in tidal_artist or tidal_artist in plex_artist:
-                    score += 30
-            
-            if hasattr(plex_track, 'duration') and hasattr(tidal_track, 'duration'):
-                plex_duration = plex_track.duration
-                tidal_duration = tidal_track.duration * 1000 if tidal_track.duration < 1000 else tidal_track.duration
-                duration_diff = abs(plex_duration - tidal_duration)
-                if duration_diff < 5000:
-                    score += 20
-                elif duration_diff < 10000:
-                    score += 10
         except:
             pass
         return score
@@ -865,79 +1224,133 @@ class MatchingThread(QThread):
         self.is_running = False
 
 
-class AuthDialog(QDialog):
-    """Dialog to show authentication URL"""
+# ============================================================================
+# TIDAL LOGIN THREAD
+# ============================================================================
+
+class TidalLoginThread(QThread):
+    login_success = pyqtSignal(object)
+    login_error = pyqtSignal(str)
+    log_signal = pyqtSignal(str)
+    auth_url_signal = pyqtSignal(str)
     
+    def __init__(self):
+        super().__init__()
+        self.session = None
+        
+    def run(self):
+        try:
+            self.log_signal.emit("Checking for saved Tidal session...")
+            self.session = tidalapi.Session()
+            if self.load_session():
+                if self.session.check_login():
+                    self.log_signal.emit("✓ Using saved Tidal session!")
+                    self.login_success.emit(self.session)
+                    return
+            
+            self.log_signal.emit("Starting OAuth flow...")
+            login, future = self.session.login_oauth()
+            auth_url = login.verification_uri_complete
+            self.auth_url_signal.emit(auth_url)
+            self.log_signal.emit("Waiting for authentication...")
+            
+            for i in range(120):
+                if future.done():
+                    break
+                time.sleep(1)
+            
+            if future.done():
+                future.result()
+                if self.session.check_login():
+                    self.log_signal.emit("Login successful!")
+                    self.save_session()
+                    self.login_success.emit(self.session)
+                else:
+                    self.login_error.emit("Login failed")
+            else:
+                self.login_error.emit("Login timeout")
+        except Exception as e:
+            self.login_error.emit(str(e))
+    
+    def load_session(self):
+        try:
+            if os.path.exists(TIDAL_SESSION_FILE):
+                with open(TIDAL_SESSION_FILE, 'r') as f:
+                    data = json.load(f)
+                    if data.get('expiry_time', 0) > time.time():
+                        self.session.token_type = data.get('token_type', 'Bearer')
+                        self.session.access_token = data.get('access_token')
+                        self.session.refresh_token = data.get('refresh_token')
+                        self.session.expiry_time = data.get('expiry_time')
+                        return True
+                    elif data.get('refresh_token'):
+                        try:
+                            self.session.token_refresh(data['refresh_token'])
+                            self.save_session()
+                            return True
+                        except:
+                            pass
+        except:
+            pass
+        return False
+    
+    def save_session(self):
+        try:
+            if self.session and self.session.access_token:
+                data = {
+                    'token_type': getattr(self.session, 'token_type', 'Bearer'),
+                    'access_token': self.session.access_token,
+                    'refresh_token': getattr(self.session, 'refresh_token', None),
+                    'expiry_time': getattr(self.session, 'expiry_time', 0)
+                }
+                with open(TIDAL_SESSION_FILE, 'w') as f:
+                    json.dump(data, f)
+                self.log_signal.emit("✓ Session saved for next time")
+        except Exception as e:
+            self.log_signal.emit(f"Error saving session: {e}")
+
+
+# ============================================================================
+# AUTH DIALOG
+# ============================================================================
+
+class AuthDialog(QDialog):
     def __init__(self, auth_url, parent=None):
         super().__init__(parent)
         self.auth_url = auth_url
-        self.init_ui()
-        
-    def init_ui(self):
         self.setWindowTitle("Tidal Authentication")
         self.setMinimumWidth(600)
-        self.setMinimumHeight(250)
+        self.setMinimumHeight(200)
         
         layout = QVBoxLayoutDialog()
-        
-        instructions = QLabel(
-            "Please open the following URL in your browser to authenticate with Tidal:\n\n"
-            "After authenticating, return to this window and click 'Continue'."
-        )
-        instructions.setWordWrap(True)
-        instructions.setStyleSheet("color: white; font-size: 12px;")
-        layout.addWidget(instructions)
+        layout.addWidget(QLabel("Open this URL in your browser to authenticate:"))
         
         url_label = QLabel(f'<a href="{self.auth_url}">{self.auth_url}</a>')
         url_label.setOpenExternalLinks(True)
-        url_label.setStyleSheet("color: #00a8ff; font-size: 14px; padding: 10px;")
-        url_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        url_label.setStyleSheet("color: #00a8ff; padding: 10px;")
         layout.addWidget(url_label)
         
-        copy_btn = QPushButton("Copy URL to Clipboard")
-        copy_btn.clicked.connect(self.copy_url)
+        copy_btn = QPushButton("Copy URL")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.auth_url))
         layout.addWidget(copy_btn)
         
         open_btn = QPushButton("Open in Browser")
-        open_btn.clicked.connect(self.open_browser)
+        open_btn.clicked.connect(lambda: webbrowser.open(self.auth_url))
         layout.addWidget(open_btn)
         
         continue_btn = QPushButton("I've Authenticated - Continue")
         continue_btn.clicked.connect(self.accept)
-        continue_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold;")
+        continue_btn.setStyleSheet("background-color: #00a8ff;")
         layout.addWidget(continue_btn)
         
         self.setLayout(layout)
-        
-        self.setStyleSheet("""
-            QDialog { background-color: #2b2b2b; }
-            QLabel { color: #ffffff; }
-            QPushButton {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555555;
-                padding: 10px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
-    
-    def copy_url(self):
-        QApplication.clipboard().setText(self.auth_url)
-        QMessageBox.information(self, "Copied", "URL copied to clipboard!")
-    
-    def open_browser(self):
-        try:
-            webbrowser.open(self.auth_url)
-            QMessageBox.information(self, "Browser Opened", 
-                "Browser should have opened. If not, please copy and paste the URL manually.")
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Could not open browser: {str(e)}")
 
+
+# ============================================================================
+# MAIN GUI
+# ============================================================================
 
 class PlexTidalMatcherGUI(QMainWindow):
-    """Main GUI window"""
-    
     def __init__(self):
         super().__init__()
         self.matches = []
@@ -945,20 +1358,27 @@ class PlexTidalMatcherGUI(QMainWindow):
         self.plex_server = None
         self.worker = None
         self.login_thread = None
-        self.auth_dialog = None
         self.selected_items = []
+        self.current_library = None
+        self.music_libraries = []
+        self.current_theme = ThemeManager.load_theme_preference()
+        self.format_filter_active = False
+        self.selected_formats = []
+        self.lossless_only = False
         
         self.load_credentials()
+        self.load_library_preference()
         self.init_ui()
+        self.apply_theme()
         
         if self.auto_connect_check.isChecked() and self._saved_plex_token:
             QTimer.singleShot(500, self.auto_connect)
+        
+        QTimer.singleShot(1000, self.auto_connect_tidal)
     
     def load_credentials(self):
-        """Load saved credentials"""
         self._saved_plex_url = "http://localhost:32400"
         self._saved_plex_token = ""
-        
         try:
             if os.path.exists(CREDENTIALS_FILE):
                 with open(CREDENTIALS_FILE, 'r') as f:
@@ -968,8 +1388,25 @@ class PlexTidalMatcherGUI(QMainWindow):
         except:
             pass
     
+    def load_library_preference(self):
+        self._saved_library_title = None
+        try:
+            if os.path.exists(LIBRARY_FILE):
+                with open(LIBRARY_FILE, 'r') as f:
+                    data = json.load(f)
+                    self._saved_library_title = data.get('library_title')
+        except:
+            pass
+    
+    def save_library_preference(self):
+        if self.current_library:
+            try:
+                with open(LIBRARY_FILE, 'w') as f:
+                    json.dump({'library_title': self.current_library.title}, f)
+            except:
+                pass
+    
     def save_credentials(self):
-        """Save credentials to file"""
         try:
             creds = {
                 'plex_url': self.plex_url_input.text().strip(),
@@ -981,122 +1418,77 @@ class PlexTidalMatcherGUI(QMainWindow):
         except Exception as e:
             self.log(f"✗ Error saving credentials: {e}")
     
+    def apply_theme(self):
+        self.setStyleSheet(ThemeManager.get_theme(self.current_theme))
+    
+    def switch_theme(self, theme_name):
+        self.current_theme = theme_name
+        self.apply_theme()
+        ThemeManager.save_theme_preference(theme_name)
+        self.log(f"✓ Switched to {theme_name} theme")
+    
     def init_ui(self):
-        self.setWindowTitle("🎵 Plex Tidal Music Matcher")
-        self.setGeometry(100, 100, 1300, 850)
+        self.setWindowTitle("🎵 Plex Tidal Music Matcher (Optimized)")
+        self.setGeometry(100, 100, 1200, 950)
         
-        self.setStyleSheet("""
-            QMainWindow { background-color: #2b2b2b; }
-            QLabel { color: #ffffff; font-size: 12px; }
-            QPushButton {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555555;
-                padding: 10px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #4a4a4a; }
-            QPushButton:disabled { background-color: #2a2a2a; color: #888888; }
-            QLineEdit, QSpinBox {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555555;
-                padding: 8px;
-                border-radius: 3px;
-            }
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #00ff00;
-                border: 1px solid #555555;
-                font-family: 'Courier New', monospace;
-                font-size: 11px;
-            }
-            QProgressBar {
-                border: 1px solid #555555;
-                border-radius: 3px;
-                text-align: center;
-                color: #ffffff;
-            }
-            QProgressBar::chunk { background-color: #00a8ff; border-radius: 2px; }
-            QGroupBox {
-                color: #ffffff;
-                border: 2px solid #555555;
-                border-radius: 5px;
-                margin-top: 10px;
-                font-weight: bold;
-                padding: 15px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-            QTableWidget {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                gridline-color: #555555;
-            }
-            QHeaderView::section {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                padding: 8px;
-                border: 1px solid #555555;
-            }
-            QTabWidget::pane {
-                border: 1px solid #555555;
-                background-color: #2b2b2b;
-            }
-            QTabBar::tab {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                padding: 10px 20px;
-            }
-            QTabBar::tab:selected { background-color: #00a8ff; }
-            QCheckBox { color: #ffffff; }
-            QMenuBar { background-color: #3c3c3c; color: #ffffff; }
-            QMenuBar::item:selected { background-color: #00a8ff; }
-            QMenu {
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555555;
-            }
-            QMenu::item:selected { background-color: #00a8ff; }
-        """)
-        
-        # Menu bar
         menubar = self.menuBar()
         
         file_menu = menubar.addMenu("File")
-        
         save_creds_action = QAction("Save Credentials", self)
         save_creds_action.triggered.connect(self.save_credentials)
         file_menu.addAction(save_creds_action)
-        
         export_action = QAction("Export Results", self)
         export_action.triggered.connect(self.export_results)
         file_menu.addAction(export_action)
-        
         file_menu.addSeparator()
-        
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+        
+        theme_menu = menubar.addMenu("Theme")
+        for theme_name in ThemeManager.get_themes():
+            theme_action = QAction(f"{theme_name.capitalize()} Theme", self)
+            theme_action.triggered.connect(lambda checked, t=theme_name: self.switch_theme(t))
+            theme_menu.addAction(theme_action)
+        
+        tools_menu = menubar.addMenu("Tools")
+        stats_action = QAction("📊 Statistics Dashboard", self)
+        stats_action.triggered.connect(self.show_statistics)
+        tools_menu.addAction(stats_action)
+        playlists_action = QAction("🎵 Create Smart Playlists", self)
+        playlists_action.triggered.connect(self.show_playlist_creator)
+        tools_menu.addAction(playlists_action)
+        tools_menu.addSeparator()
+        progress_action = QAction("📁 Manage Saved Progress", self)
+        progress_action.triggered.connect(self.show_progress_manager)
+        tools_menu.addAction(progress_action)
+        tools_menu.addSeparator()
+        clear_filter_action = QAction("Clear Format Filter", self)
+        clear_filter_action.triggered.connect(self.clear_format_filter)
+        tools_menu.addAction(clear_filter_action)
+        
+        account_menu = menubar.addMenu("Account")
+        tidal_info_action = QAction("🌊 Tidal Account Info", self)
+        tidal_info_action.triggered.connect(self.show_tidal_account_info)
+        account_menu.addAction(tidal_info_action)
+        account_menu.addSeparator()
+        logout_tidal_action = QAction("🚪 Logout from Tidal", self)
+        logout_tidal_action.triggered.connect(self.logout_tidal)
+        account_menu.addAction(logout_tidal_action)
         
         view_menu = menubar.addMenu("View")
         clear_log_action = QAction("Clear Log", self)
         clear_log_action.triggered.connect(lambda: self.log_output.clear())
         view_menu.addAction(clear_log_action)
         
-        # Central widget
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         
-        # Connection group
         conn_group = QGroupBox("Connection Settings")
         conn_layout = QGridLayout()
         
-        conn_layout.addWidget(QLabel("Plex Server URL:"), 0, 0)
+        conn_layout.addWidget(QLabel("Plex URL:"), 0, 0)
         self.plex_url_input = QLineEdit(self._saved_plex_url)
         conn_layout.addWidget(self.plex_url_input, 0, 1)
         
@@ -1110,16 +1502,14 @@ class PlexTidalMatcherGUI(QMainWindow):
         conn_layout.addWidget(help_btn, 1, 2)
         
         plex_btn_layout = QHBoxLayout()
-        
         self.plex_btn = QPushButton("Connect to Plex")
         self.plex_btn.clicked.connect(self.connect_plex)
         plex_btn_layout.addWidget(self.plex_btn)
         
-        self.auto_connect_check = QCheckBox("Auto-connect on startup")
+        self.auto_connect_check = QCheckBox("Auto-connect")
         self.auto_connect_check.setChecked(True)
         plex_btn_layout.addWidget(self.auto_connect_check)
-        
-        conn_layout.addLayout(plex_btn_layout, 2, 1, 1, 2)
+        conn_layout.addLayout(plex_btn_layout, 2, 1)
         
         self.tidal_btn = QPushButton("Login to Tidal")
         self.tidal_btn.clicked.connect(self.connect_tidal)
@@ -1132,63 +1522,78 @@ class PlexTidalMatcherGUI(QMainWindow):
         conn_group.setLayout(conn_layout)
         main_layout.addWidget(conn_group)
         
-        # Selection group
+        library_group = QGroupBox("Library Information")
+        library_layout = QHBoxLayout()
+        
+        self.library_label = QLabel("📚 No library selected")
+        self.library_label.setStyleSheet("color: #888888; font-style: italic; padding: 5px;")
+        library_layout.addWidget(self.library_label)
+        library_layout.addStretch()
+        
+        self.library_select_btn = QPushButton("Change Library")
+        self.library_select_btn.clicked.connect(self.select_library)
+        self.library_select_btn.setEnabled(False)
+        library_layout.addWidget(self.library_select_btn)
+        
+        library_group.setLayout(library_layout)
+        main_layout.addWidget(library_group)
+        
         selection_group = QGroupBox("Library Selection")
         selection_layout = QHBoxLayout()
         
         self.select_btn = QPushButton("🎵 Select Playlists/Albums/Artists")
         self.select_btn.clicked.connect(self.select_library_items)
         self.select_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold; padding: 12px;")
+        self.select_btn.setEnabled(False)
         selection_layout.addWidget(self.select_btn)
         
         self.selection_status = QLabel("No items selected - will process entire library")
         self.selection_status.setStyleSheet("color: #888888; font-style: italic; padding: 5px;")
         selection_layout.addWidget(self.selection_status)
         
+        self.clear_selection_btn = QPushButton("Clear Selection")
+        self.clear_selection_btn.clicked.connect(self.clear_selection)
+        self.clear_selection_btn.setEnabled(False)
+        selection_layout.addWidget(self.clear_selection_btn)
+        
         selection_layout.addStretch()
         selection_group.setLayout(selection_layout)
         main_layout.addWidget(selection_group)
         
-        # Options group
-        options_group = QGroupBox("Matching Options")
+        options_group = QGroupBox("Options")
         options_layout = QGridLayout()
         
         options_layout.addWidget(QLabel("Match Threshold (%):"), 0, 0)
         self.threshold_spin = QSpinBox()
         self.threshold_spin.setRange(50, 100)
         self.threshold_spin.setValue(70)
-        self.threshold_spin.setToolTip("Minimum match confidence required")
         options_layout.addWidget(self.threshold_spin, 0, 1)
         
-        self.limit_check = QCheckBox("Limit number of artists to process")
-        self.limit_check.setChecked(False)
-        options_layout.addWidget(self.limit_check, 1, 0)
-        
-        options_layout.addWidget(QLabel("Artist Limit:"), 1, 1)
-        self.limit_spin = QSpinBox()
-        self.limit_spin.setRange(1, 1000)
-        self.limit_spin.setValue(50)
-        options_layout.addWidget(self.limit_spin, 1, 2)
-        
-        self.deduplicate_check = QCheckBox("Deduplicate tracks (keep only original/best version)")
+        self.deduplicate_check = QCheckBox("Deduplicate tracks")
         self.deduplicate_check.setChecked(True)
-        self.deduplicate_check.setToolTip("When multiple versions exist, only process the original/best version")
-        options_layout.addWidget(self.deduplicate_check, 2, 0, 1, 3)
+        options_layout.addWidget(self.deduplicate_check, 1, 0, 1, 2)
         
-        self.update_ratings_check = QCheckBox("Update Plex ratings automatically")
+        self.update_ratings_check = QCheckBox("Auto-update ratings")
         self.update_ratings_check.setChecked(False)
-        options_layout.addWidget(self.update_ratings_check, 3, 0, 1, 3)
+        options_layout.addWidget(self.update_ratings_check, 2, 0, 1, 2)
+        
+        self.filter_format_btn = QPushButton("🎵 Audio Format Filter")
+        self.filter_format_btn.clicked.connect(self.show_format_filter)
+        options_layout.addWidget(self.filter_format_btn, 3, 0, 1, 2)
+        
+        self.format_filter_status = QLabel("No format filter active")
+        self.format_filter_status.setStyleSheet("color: #888888; font-style: italic; font-size: 11px;")
+        options_layout.addWidget(self.format_filter_status, 4, 0, 1, 2)
         
         options_group.setLayout(options_layout)
         main_layout.addWidget(options_group)
         
-        # Control buttons
         btn_layout = QHBoxLayout()
         
         self.start_btn = QPushButton("▶ Start Matching")
         self.start_btn.clicked.connect(self.start_matching)
         self.start_btn.setEnabled(False)
-        self.start_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold; padding: 12px;")
+        self.start_btn.setStyleSheet("background-color: #00a8ff; font-weight: bold;")
         btn_layout.addWidget(self.start_btn)
         
         self.stop_btn = QPushButton("⬛ Stop")
@@ -1196,53 +1601,44 @@ class PlexTidalMatcherGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         btn_layout.addWidget(self.stop_btn)
         
-        self.clear_btn = QPushButton("🗑️ Clear Selection")
-        self.clear_btn.clicked.connect(self.clear_selection)
-        self.clear_btn.setEnabled(False)
-        btn_layout.addWidget(self.clear_btn)
-        
         main_layout.addLayout(btn_layout)
         
-        # Progress bar
         self.progress_bar = QProgressBar()
         main_layout.addWidget(self.progress_bar)
         
         self.progress_label = QLabel("Ready")
-        self.progress_label.setStyleSheet("color: #888888;")
         main_layout.addWidget(self.progress_label)
         
-        # Tabs
         tabs = QTabWidget()
         
-        # Results tab
         results_widget = QWidget()
         results_layout = QVBoxLayout(results_widget)
-        
         self.results_table = QTableWidget()
         self.results_table.setColumnCount(5)
         self.results_table.setHorizontalHeaderLabels(["Artist", "Track", "Album", "Popularity", "Rating"])
         self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.results_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.results_table.customContextMenuRequested.connect(self.show_context_menu)
+        self.results_table.customContextMenuRequested.connect(self.show_results_context_menu)
         results_layout.addWidget(self.results_table)
-        
         tabs.addTab(results_widget, "Matches")
         
-        # Log tab
         log_widget = QWidget()
         log_layout = QVBoxLayout(log_widget)
-        
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         log_layout.addWidget(self.log_output)
-        
         tabs.addTab(log_widget, "Log")
         
         main_layout.addWidget(tabs)
         
-        self.log("🎵 Plex Tidal Music Matcher initialized")
-        self.log("Enter Plex credentials and connect, then login to Tidal")
-        self.log("Use 'Select Playlists/Albums/Artists' to process specific items")
+        self.log("🎵 Plex Tidal Music Matcher (Optimized) initialized")
+        self.setup_shortcuts()
+    
+    def setup_shortcuts(self):
+        QShortcut(QKeySequence.StandardKey.Save, self).activated.connect(self.save_credentials)
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.start_matching)
+        QShortcut(QKeySequence.StandardKey.Cancel, self).activated.connect(self.stop_matching)
+        QShortcut(QKeySequence("Ctrl+E"), self).activated.connect(self.export_results)
     
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1253,24 +1649,21 @@ class PlexTidalMatcherGUI(QMainWindow):
         QApplication.processEvents()
     
     def show_token_help(self):
-        msg = QMessageBox()
-        msg.setWindowTitle("Plex Token Help")
-        msg.setText(
+        QMessageBox.information(self, "Plex Token Help",
             "To find your Plex token:\n\n"
-            "1. Open Plex Web App and sign in\n"
+            "1. Open Plex Web App\n"
             "2. Click on any media item\n"
-            "3. Click the three dots (...) and select 'Get Info'\n"
-            "4. Click 'View XML'\n"
-            "5. Look for 'X-Plex-Token=' in the URL\n\n"
-            "Copy the long string of letters and numbers after the equals sign."
-        )
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.exec()
+            "3. Click ... → Get Info → View XML\n"
+            "4. Look for 'X-Plex-Token=' in the URL")
     
     def auto_connect(self):
         if self._saved_plex_token:
-            self.log("Auto-connecting to Plex...")
             self.connect_plex()
+    
+    def auto_connect_tidal(self):
+        if os.path.exists(TIDAL_SESSION_FILE):
+            self.log("Found saved Tidal session, auto-connecting...")
+            self.connect_tidal()
     
     def connect_plex(self):
         try:
@@ -1281,45 +1674,75 @@ class PlexTidalMatcherGUI(QMainWindow):
                 QMessageBox.warning(self, "Missing Info", "Please enter Plex URL and Token")
                 return
             
-            self.log("Connecting to Plex...")
             self.plex_server = PlexServer(url, token)
+            self.log(f"✓ Connected to Plex: {self.plex_server.friendlyName}")
             
-            name = self.plex_server.friendlyName
-            self.log(f"✓ Connected to Plex: {name}")
+            self.music_libraries = [s for s in self.plex_server.library.sections() if s.type == 'artist']
+            
+            if not self.music_libraries:
+                self.log("⚠️ No music libraries found!")
+                QMessageBox.warning(self, "No Music Library", 
+                    "No music libraries found on this Plex server.\n"
+                    "Please make sure you have a music library set up.")
+                return
+            
+            if self._saved_library_title:
+                for lib in self.music_libraries:
+                    if lib.title == self._saved_library_title:
+                        self.current_library = lib
+                        self.log(f"✓ Restored library: {lib.title}")
+                        break
+            
+            if not self.current_library:
+                self.current_library = self.music_libraries[0]
+                self.log(f"✓ Using library: {self.current_library.title}")
+            
+            self.library_label.setText(f"📚 Library: {self.current_library.title}")
+            self.save_library_preference()
             
             self.save_credentials()
-            
             self.plex_btn.setEnabled(False)
-            self.plex_url_input.setEnabled(False)
-            self.plex_token_input.setEnabled(False)
-            
             self.select_btn.setEnabled(True)
-            
+            self.library_select_btn.setEnabled(True)
             self.update_status()
             
         except Exception as e:
             self.log(f"✗ Plex connection failed: {e}")
             QMessageBox.critical(self, "Connection Error", str(e))
     
+    def select_library(self):
+        if not self.plex_server or not self.music_libraries:
+            return
+        
+        dialog = LibrarySelector(self.plex_server, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.current_library = dialog.get_selected_library()
+            if self.current_library:
+                self.log(f"✓ Selected library: {self.current_library.title}")
+                self.library_label.setText(f"📚 Library: {self.current_library.title}")
+                self.save_library_preference()
+                
+                self.selected_items = []
+                self.selection_status.setText("No items selected - will process entire library")
+                self.selection_status.setStyleSheet("color: #888888; font-style: italic;")
+                self.clear_selection_btn.setEnabled(False)
+    
     def connect_tidal(self):
         try:
-            self.log("Starting Tidal login...")
             self.tidal_btn.setEnabled(False)
-            
             self.login_thread = TidalLoginThread()
             self.login_thread.log_signal.connect(self.log)
             self.login_thread.auth_url_signal.connect(self.show_auth_dialog)
             self.login_thread.login_success.connect(self.on_tidal_success)
             self.login_thread.login_error.connect(self.on_tidal_error)
             self.login_thread.start()
-            
         except Exception as e:
-            self.log(f"✗ Tidal connection error: {e}")
+            self.log(f"✗ Tidal error: {e}")
             self.tidal_btn.setEnabled(True)
     
     def show_auth_dialog(self, auth_url):
-        self.auth_dialog = AuthDialog(auth_url, self)
-        self.auth_dialog.exec()
+        dialog = AuthDialog(auth_url, self)
+        dialog.exec()
     
     def on_tidal_success(self, session):
         self.tidal_session = session
@@ -1328,69 +1751,152 @@ class PlexTidalMatcherGUI(QMainWindow):
         self.update_status()
     
     def on_tidal_error(self, error_msg):
-        self.log(f"✗ Tidal login failed: {error_msg}")
+        self.log(f"✗ Login failed: {error_msg}")
         self.tidal_btn.setEnabled(True)
-        QMessageBox.critical(self, "Login Error", error_msg)
+    
+    def logout_tidal(self):
+        try:
+            if os.path.exists(TIDAL_SESSION_FILE):
+                os.remove(TIDAL_SESSION_FILE)
+            self.tidal_session = None
+            self.tidal_btn.setEnabled(True)
+            self.log("✓ Logged out of Tidal (session cleared)")
+            self.update_status()
+        except Exception as e:
+            self.log(f"✗ Error: {e}")
     
     def update_status(self):
         if self.plex_server and self.tidal_session:
-            self.status_label.setText("✓ Connected to Plex and Tidal - Ready!")
-            self.status_label.setStyleSheet("color: #51cf66; padding: 5px; font-weight: bold;")
+            self.status_label.setText("✓ Connected - Ready!")
+            self.status_label.setStyleSheet("color: #51cf66;")
             self.start_btn.setEnabled(True)
         elif self.plex_server:
-            self.status_label.setText("✓ Connected to Plex - Login to Tidal")
-            self.status_label.setStyleSheet("color: #ffa500; padding: 5px;")
+            self.status_label.setText("✓ Plex connected - Login to Tidal")
+            self.status_label.setStyleSheet("color: #ffa500;")
         elif self.tidal_session:
-            self.status_label.setText("✓ Connected to Tidal - Connect to Plex")
-            self.status_label.setStyleSheet("color: #ffa500; padding: 5px;")
+            self.status_label.setText("✓ Tidal connected - Connect to Plex")
+            self.status_label.setStyleSheet("color: #ffa500;")
     
     def select_library_items(self):
         if not self.plex_server:
             QMessageBox.warning(self, "Not Connected", "Please connect to Plex first")
             return
         
-        dialog = LibrarySelectorDialog(self.plex_server, self)
+        if not self.current_library:
+            QMessageBox.warning(self, "No Library", "Please select a music library first")
+            return
+        
+        dialog = FastLibrarySelectorDialog(self.plex_server, self, self.current_library)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.selected_items = dialog.get_selected_items()
             
             if self.selected_items:
                 type_counts = {}
                 total_tracks = 0
-                
                 for item in self.selected_items:
                     item_type = item['type']
                     type_counts[item_type] = type_counts.get(item_type, 0) + 1
                     
-                    try:
-                        if item_type == 'playlist':
-                            total_tracks += len(item['object'].items())
-                        elif item_type == 'album':
-                            total_tracks += len(item['object'].tracks())
-                        elif item_type == 'artist':
-                            total_tracks += len(item['object'].tracks())
-                    except:
-                        pass
-                
                 status_parts = [f"{count} {item_type}{'s' if count > 1 else ''}" 
                                for item_type, count in type_counts.items()]
-                
-                self.selection_status.setText(f"Selected: {', '.join(status_parts)} (~{total_tracks} tracks)")
+                self.selection_status.setText(f"Selected: {', '.join(status_parts)}")
                 self.selection_status.setStyleSheet("color: #51cf66; font-style: normal; font-weight: bold;")
-                self.clear_btn.setEnabled(True)
-                
+                self.clear_selection_btn.setEnabled(True)
                 self.log(f"Selected {len(self.selected_items)} items: {', '.join(status_parts)}")
-                self.log(f"  Estimated {total_tracks} tracks to process")
             else:
                 self.selection_status.setText("No items selected - will process entire library")
                 self.selection_status.setStyleSheet("color: #888888; font-style: italic;")
-                self.clear_btn.setEnabled(False)
+                self.clear_selection_btn.setEnabled(False)
     
     def clear_selection(self):
         self.selected_items = []
         self.selection_status.setText("No items selected - will process entire library")
         self.selection_status.setStyleSheet("color: #888888; font-style: italic;")
-        self.clear_btn.setEnabled(False)
+        self.clear_selection_btn.setEnabled(False)
         self.log("Selection cleared - will process entire library")
+    
+    def show_format_filter(self):
+        dialog = FormatFilterDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.lossless_only = dialog.is_lossless_only()
+            self.selected_formats = dialog.get_selected_formats()
+            self.format_filter_active = self.lossless_only or bool(self.selected_formats)
+            
+            if self.format_filter_active:
+                if self.lossless_only:
+                    self.format_filter_status.setText("🎵 Filter: Lossless only (ALAC, FLAC, WAV, etc.)")
+                elif self.selected_formats:
+                    formats = ', '.join(f.upper() for f in self.selected_formats[:3])
+                    if len(self.selected_formats) > 3:
+                        formats += f" +{len(self.selected_formats)-3} more"
+                    self.format_filter_status.setText(f"🎵 Filter: {formats}")
+                self.format_filter_status.setStyleSheet("color: #51cf66; font-style: normal; font-size: 11px;")
+            else:
+                self.format_filter_status.setText("No format filter active")
+                self.format_filter_status.setStyleSheet("color: #888888; font-style: italic; font-size: 11px;")
+    
+    def clear_format_filter(self):
+        self.format_filter_active = False
+        self.selected_formats = []
+        self.lossless_only = False
+        self.format_filter_status.setText("No format filter active")
+        self.format_filter_status.setStyleSheet("color: #888888; font-style: italic; font-size: 11px;")
+        self.log("✓ Format filter cleared")
+    
+    def show_statistics(self):
+        if not self.matches:
+            QMessageBox.information(self, "No Data", "Run matching first")
+            return
+        dialog = StatsDialog(self.matches, self)
+        dialog.exec()
+    
+    def show_playlist_creator(self):
+        if not self.plex_server:
+            QMessageBox.warning(self, "Not Connected", "Connect to Plex first")
+            return
+        if not self.matches:
+            QMessageBox.information(self, "No Matches", "Run matching first")
+            return
+        dialog = PlaylistCreationDialog(self.plex_server, self.matches, self)
+        dialog.exec()
+    
+    def show_progress_manager(self):
+        dialog = ProgressDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            progress = ProgressManager.load_progress()
+            if progress:
+                self.results_table.setRowCount(0)
+                for match_data in progress.get('matches', []):
+                    row = self.results_table.rowCount()
+                    self.results_table.insertRow(row)
+                    self.results_table.setItem(row, 0, QTableWidgetItem(match_data.get('artist', '')))
+                    self.results_table.setItem(row, 1, QTableWidgetItem(match_data.get('track', '')))
+                    self.results_table.setItem(row, 2, QTableWidgetItem(match_data.get('album', '')))
+                    self.results_table.setItem(row, 3, QTableWidgetItem(str(match_data.get('popularity', 0))))
+                    self.results_table.setItem(row, 4, QTableWidgetItem(f"{match_data.get('rating', 0):.1f} ★"))
+                self.log(f"✓ Loaded {progress.get('matches_count', 0)} matches")
+    
+    def show_tidal_account_info(self):
+        if not self.tidal_session:
+            QMessageBox.warning(self, "Not Connected", "Login to Tidal first")
+            return
+        dialog = TidalAccountDialog(self.tidal_session, self)
+        dialog.exec()
+    
+    def show_results_context_menu(self, position):
+        menu = QMenu()
+        copy_action = QAction("Copy Track Info", self)
+        copy_action.triggered.connect(self.copy_selected_track_info)
+        menu.addAction(copy_action)
+        menu.exec(self.results_table.viewport().mapToGlobal(position))
+    
+    def copy_selected_track_info(self):
+        row = self.results_table.currentRow()
+        if row >= 0:
+            artist = self.results_table.item(row, 0).text()
+            track = self.results_table.item(row, 1).text()
+            QApplication.clipboard().setText(f"{artist} - {track}")
+            self.log(f"Copied: {artist} - {track}")
     
     def start_matching(self):
         if not self.plex_server or not self.tidal_session:
@@ -1398,20 +1904,22 @@ class PlexTidalMatcherGUI(QMainWindow):
         
         options = {
             'match_threshold': self.threshold_spin.value(),
-            'limit_artists': self.limit_check.isChecked() and not self.selected_items,
-            'artist_limit': self.limit_spin.value(),
             'deduplicate': self.deduplicate_check.isChecked(),
-            'update_ratings': self.update_ratings_check.isChecked()
+            'update_ratings': self.update_ratings_check.isChecked(),
+            'limit_artists': False,
+            'filter_lossless': self.lossless_only,
+            'selected_formats': self.selected_formats if self.format_filter_active else []
         }
         
         self.matches = []
         self.results_table.setRowCount(0)
         
-        self.worker = MatchingThread(
+        self.worker = FastMatchingThread(
             self.plex_server, 
             self.tidal_session, 
-            options,
-            self.selected_items if self.selected_items else None
+            options, 
+            self.selected_items or None,
+            self.current_library
         )
         self.worker.log_signal.connect(self.log)
         self.worker.progress_signal.connect(self.update_progress)
@@ -1424,12 +1932,12 @@ class PlexTidalMatcherGUI(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.select_btn.setEnabled(False)
-        self.clear_btn.setEnabled(False)
+        self.clear_selection_btn.setEnabled(False)
+        self.library_select_btn.setEnabled(False)
     
     def stop_matching(self):
         if self.worker:
             self.worker.stop()
-            self.log("Stopping...")
     
     def update_progress(self, current, total):
         self.progress_bar.setMaximum(total)
@@ -1437,7 +1945,6 @@ class PlexTidalMatcherGUI(QMainWindow):
     
     def add_match(self, match_info):
         self.matches.append(match_info)
-        
         row = self.results_table.rowCount()
         self.results_table.insertRow(row)
         
@@ -1457,65 +1964,35 @@ class PlexTidalMatcherGUI(QMainWindow):
         self.results_table.setItem(row, 2, QTableWidgetItem(album))
         self.results_table.setItem(row, 3, QTableWidgetItem(str(popularity)))
         self.results_table.setItem(row, 4, QTableWidgetItem(f"{rating:.1f} ★"))
-        
-        if popularity > 75:
-            for col in range(5):
-                item = self.results_table.item(row, col)
-                if item:
-                    item.setBackground(QColor(60, 80, 60))
-        elif popularity > 50:
-            for col in range(5):
-                item = self.results_table.item(row, col)
-                if item:
-                    item.setBackground(QColor(80, 80, 60))
-    
-    def show_context_menu(self, position):
-        menu = QMenu()
-        
-        copy_action = QAction("Copy Track Info", self)
-        copy_action.triggered.connect(self.copy_selected)
-        menu.addAction(copy_action)
-        
-        menu.exec(self.results_table.viewport().mapToGlobal(position))
-    
-    def copy_selected(self):
-        row = self.results_table.currentRow()
-        if row >= 0:
-            artist = self.results_table.item(row, 0).text()
-            track = self.results_table.item(row, 1).text()
-            QApplication.clipboard().setText(f"{artist} - {track}")
-            self.log(f"Copied: {artist} - {track}")
     
     def matching_finished(self, matches):
-        self.log(f"✓ Matching completed! Found {len(matches)} matches")
-        self.progress_label.setText(f"Complete - {len(matches)} matches found")
+        self.log(f"✓ Completed! Found {len(matches)} matches")
+        self.progress_label.setText(f"Complete - {len(matches)} matches")
+        
+        if matches:
+            ProgressManager.save_progress(matches)
+            self.log("✓ Progress saved")
         
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.select_btn.setEnabled(True)
+        self.library_select_btn.setEnabled(True)
         
         if self.selected_items:
-            self.clear_btn.setEnabled(True)
-        
-        if matches:
-            QMessageBox.information(self, "Complete", 
-                f"Matching completed!\nFound {len(matches)} matches.")
+            self.clear_selection_btn.setEnabled(True)
     
     def export_results(self):
         if not self.matches:
             QMessageBox.information(self, "No Results", "No matches to export")
             return
         
-        try:
-            filename, _ = QFileDialog.getSaveFileName(
-                self, "Save Results",
-                f"plex_tidal_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                "JSON Files (*.json)"
-            )
-            
-            if not filename:
-                return
-            
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Results",
+            f"plex_tidal_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            "JSON Files (*.json)"
+        )
+        
+        if filename:
             export_data = []
             for match in self.matches:
                 try:
@@ -1530,18 +2007,13 @@ class PlexTidalMatcherGUI(QMainWindow):
                     'track': match['plex_track'].title,
                     'album': album,
                     'popularity': match['popularity'],
-                    'match_score': match['match_score'],
                     'rating': min(5, max(0, match['popularity'] / 20))
                 })
             
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(export_data, f, indent=2)
             
-            self.log(f"✓ Exported {len(export_data)} matches to {filename}")
-            QMessageBox.information(self, "Export Complete", f"Exported to:\n{filename}")
-            
-        except Exception as e:
-            self.log(f"✗ Export error: {e}")
+            self.log(f"✓ Exported to {filename}")
     
     def closeEvent(self, event):
         if self.plex_token_input.text():
@@ -1550,17 +2022,12 @@ class PlexTidalMatcherGUI(QMainWindow):
 
 
 def main():
-    """Main entry point"""
-    print("Starting Plex Tidal Matcher...")
-    
+    print("Starting Plex Tidal Matcher (Optimized)...")
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-    
     window = PlexTidalMatcherGUI()
     window.show()
-    
     print("Window displayed.")
-    
     return app.exec()
 
 
